@@ -1,0 +1,86 @@
+name: Compiler l'APK
+
+# Se lance à chaque envoi de code, et manuellement via « Run workflow »
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Installer Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Installer les dépendances système
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip openjdk-17-jdk autoconf automake libtool \
+            pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev \
+            libtinfo5 cmake libffi-dev libssl-dev build-essential ccache
+
+      - name: Installer Buildozer
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer "cython<3" virtualenv
+
+      # Ajoute automatiquement 2 réglages indispensables s'ils manquent :
+      # - sqlite3 (sinon l'appli plante sur Android car elle utilise SQLite)
+      # - acceptation de la licence du SDK Android (obligatoire en CI)
+      - name: Ajuster buildozer.spec
+        run: |
+          grep -q "sqlite3" buildozer.spec || sed -i 's/^requirements *= */requirements = sqlite3,/' buildozer.spec
+          grep -q "android.accept_sdk_license" buildozer.spec || sed -i '/^android.api/a android.accept_sdk_license = True' buildozer.spec
+          grep -E "^(requirements|android\.)" buildozer.spec
+
+      - name: Cache Buildozer (accélère les builds suivants)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            .buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: Compiler l'APK
+        env:
+          BUILDOZER_WARN_ON_ROOT: "0"
+        run: |
+          set -o pipefail
+          buildozer -v android debug 2>&1 | tee build.log
+
+      - name: Résumé de l'erreur (visible seulement si échec)
+        if: failure()
+        run: |
+          echo "=========== LIGNES D'ERREUR ==========="
+          grep -v '^#     ' build.log | grep -n -i -E "error|exception|traceback|failed|not found|no such|cannot|conflict" | tail -40 || true
+          echo "=========== 100 DERNIÈRES LIGNES UTILES ==========="
+          grep -v '^#     ' build.log | tail -100
+
+      - name: Sauvegarder le journal complet
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-build
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Publier l'APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: CliniqueAutoMada-apk
+          path: bin/*.apk
+          if-no-files-found: error
